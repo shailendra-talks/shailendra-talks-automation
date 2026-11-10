@@ -34,7 +34,7 @@ def generate_script():
     - Memorable punchline
     - Original jokes only
     - No fake statistics or fabricated facts
-    - Suitable for one person speaking to camera
+    - Suitable for one person speaking
     - Write in natural Roman Hindi and English
 
     Return only the spoken script.
@@ -44,13 +44,14 @@ def generate_script():
     print("Connecting to Groq AI...")
 
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-20b",
         messages=[
             {
                 "role": "system",
                 "content": (
                     "You are a creative Indian Hinglish "
-                    "YouTube Shorts scriptwriter."
+                    "YouTube Shorts scriptwriter. "
+                    "Always return the final spoken script."
                 )
             },
             {
@@ -58,14 +59,19 @@ def generate_script():
                 "content": prompt
             }
         ],
+        reasoning_effort="low",
+        reasoning_format="hidden",
         temperature=0.8,
-        max_completion_tokens=1200
+        max_completion_tokens=3000
     )
 
     script = response.choices[0].message.content
 
     if not script or not script.strip():
-        raise RuntimeError("Groq returned an empty script.")
+        raise RuntimeError(
+            "Groq returned an empty script. "
+            "Check model response and token limits."
+        )
 
     script = script.strip()
 
