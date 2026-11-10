@@ -1,42 +1,23 @@
 
 import os
 from pathlib import Path
-
-from google import genai
-from google.genai import types
-
-
-def extract_script(response):
-    """Extract text even if response.text is unavailable."""
-
-    text = getattr(response, "text", None)
-
-    if text and text.strip():
-        return text.strip()
-
-    candidates = getattr(response, "candidates", None) or []
-
-    for candidate in candidates:
-        content = getattr(candidate, "content", None)
-        parts = getattr(content, "parts", None) or []
-
-        for part in parts:
-            part_text = getattr(part, "text", None)
-
-            if part_text and part_text.strip():
-                return part_text.strip()
-
-    return None
+from groq import Groq
 
 
 def generate_script():
 
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = os.getenv("GROQ_API_KEY")
 
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is missing.")
+        raise RuntimeError(
+            "GROQ_API_KEY is missing. Check GitHub Secrets."
+        )
 
-    client = genai.Client(api_key=api_key)
+    client = Groq(
+        api_key=api_key,
+        timeout=60.0,
+        max_retries=3
+    )
 
     prompt = """
     You are the original Hinglish comedy writer for
@@ -51,74 +32,42 @@ def generate_script():
     - Funny, sarcastic and relatable
     - Strong opening hook in first 3 seconds
     - Memorable punchline
-    - No copied jokes or existing scripts
+    - Original jokes only
     - No fake statistics or fabricated facts
     - Suitable for one person speaking to camera
+    - Write in natural Roman Hindi and English
 
     Return only the spoken script.
     Do not add camera directions or explanations.
     """
 
-    models_to_try = [
-        "gemini-3.5-flash",
-        "gemini-3.6-flash",
-        "gemini-3.8-flash"
-    ]
+    print("Connecting to Groq AI...")
 
-    script = None
-
-    for model_name in models_to_try:
-
-        print(f"\nTrying model: {model_name}")
-
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.8,
-                    max_output_tokens=900
+    response = client.chat.completions.create(
+        model="openai/gpt-oss-20b",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a creative Indian Hinglish "
+                    "YouTube Shorts scriptwriter."
                 )
-            )
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        temperature=0.8,
+        max_completion_tokens=1200
+    )
 
-            script = extract_script(response)
+    script = response.choices[0].message.content
 
-            if script:
-                print(f"SUCCESS: {model_name}")
-                break
+    if not script or not script.strip():
+        raise RuntimeError("Groq returned an empty script.")
 
-            print("Model returned no usable text.")
-            print("Prompt feedback:", getattr(
-                response, "prompt_feedback", None
-            ))
-
-            candidates = getattr(response, "candidates", None) or []
-
-            for candidate in candidates:
-                print(
-                    "Finish reason:",
-                    getattr(candidate, "finish_reason", None)
-                )
-                print(
-                    "Safety ratings:",
-                    getattr(candidate, "safety_ratings", None)
-                )
-
-            print("Trying next model...")
-
-        except Exception as error:
-
-            print(f"Model failed: {model_name}")
-            print("Error:", str(error))
-            print("Trying next model...")
-
-            continue
-
-    if not script:
-        raise RuntimeError(
-            "All Gemini models failed to generate a usable script. "
-            "Check the logs for the actual errors."
-        )
+    script = script.strip()
 
     output_dir = Path("output")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -131,8 +80,8 @@ def generate_script():
     )
 
     print("\nSCRIPT GENERATED SUCCESSFULLY!")
-    print("\n", script)
-    print("\nSaved at:", output_file)
+    print("\n" + script)
+    print("\nSaved to:", output_file)
 
 
 if __name__ == "__main__":
