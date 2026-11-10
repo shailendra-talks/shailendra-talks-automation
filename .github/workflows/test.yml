@@ -1,0 +1,37 @@
+
+name: Shailendra Talks - AI Script Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  generate-script:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Download project
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate AI script
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python -m src.scripts
+
+      - name: Save generated script
+        uses: actions/upload-artifact@v4
+        with:
+          name: shailendra-talks-script
+          path: output/short_script.txt
+          if-no-files-found: error
