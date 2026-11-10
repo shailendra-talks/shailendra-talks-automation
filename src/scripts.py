@@ -34,7 +34,7 @@ def generate_script():
     """
 
     response = client.models.generate_content(
-        model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"),
+        model=os.getenv("GEMINI_MODEL", "gemini-3.8-flash"),
         contents=prompt,
         config=types.GenerateContentConfig(
             temperature=0.8,
