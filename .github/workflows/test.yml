@@ -1,5 +1,5 @@
 
-name: Shailendra Talks - AI Voice Test
+name: Shailendra Talks - AI Shorts Generator
 
 on:
   workflow_dispatch:
@@ -8,9 +8,9 @@ permissions:
   contents: read
 
 jobs:
-  generate-video-assets:
+  generate-video:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Download project
@@ -22,7 +22,8 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
 
       - name: Generate AI script
         env:
@@ -34,11 +35,16 @@ jobs:
           SARVAM_API_KEY: ${{ secrets.SARVAM_API_KEY }}
         run: python -m src.voice
 
-      - name: Save script and voice
+      - name: Generate YouTube Shorts video
+        run: python -m src.video
+
+      - name: Save final video and assets
         uses: actions/upload-artifact@v4
         with:
-          name: shailendra-talks-audio
+          name: shailendra-talks-final-video
           path: |
+            output/short_video.mp4
             output/short_script.txt
             output/voiceover.wav
+            output/captions.srt
           if-no-files-found: error
