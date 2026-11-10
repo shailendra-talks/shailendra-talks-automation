@@ -1,5 +1,5 @@
 
-name: Shailendra Talks - AI Script Test
+name: Shailendra Talks - AI Voice Test
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  generate-script:
+  generate-video-assets:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -29,9 +29,16 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: python -m src.scripts
 
-      - name: Save generated script
+      - name: Generate AI voice
+        env:
+          SARVAM_API_KEY: ${{ secrets.SARVAM_API_KEY }}
+        run: python -m src.voice
+
+      - name: Save script and voice
         uses: actions/upload-artifact@v4
         with:
-          name: shailendra-talks-script
-          path: output/short_script.txt
+          name: shailendra-talks-audio
+          path: |
+            output/short_script.txt
+            output/voiceover.wav
           if-no-files-found: error
