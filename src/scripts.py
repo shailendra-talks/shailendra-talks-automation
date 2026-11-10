@@ -1,10 +1,32 @@
 
 import os
-import time
 from pathlib import Path
 
 from google import genai
 from google.genai import types
+
+
+def extract_script(response):
+    """Extract text even if response.text is unavailable."""
+
+    text = getattr(response, "text", None)
+
+    if text and text.strip():
+        return text.strip()
+
+    candidates = getattr(response, "candidates", None) or []
+
+    for candidate in candidates:
+        content = getattr(candidate, "content", None)
+        parts = getattr(content, "parts", None) or []
+
+        for part in parts:
+            part_text = getattr(part, "text", None)
+
+            if part_text and part_text.strip():
+                return part_text.strip()
+
+    return None
 
 
 def generate_script():
@@ -12,10 +34,7 @@ def generate_script():
     api_key = os.getenv("GEMINI_API_KEY")
 
     if not api_key:
-        raise RuntimeError(
-            "GEMINI_API_KEY is missing. "
-            "Please check GitHub Secrets."
-        )
+        raise RuntimeError("GEMINI_API_KEY is missing.")
 
     client = genai.Client(api_key=api_key)
 
@@ -41,94 +60,79 @@ def generate_script():
     """
 
     models_to_try = [
-        os.getenv("GEMINI_MODEL", "gemini-3.8-flash"),
-        "gemini-3.6-flash"
+        "gemini-3.5-flash",
+        "gemini-3.6-flash",
+        "gemini-3.8-flash"
     ]
 
-    # Remove duplicate model names
-    models_to_try = list(dict.fromkeys(models_to_try))
-
-    response = None
+    script = None
 
     for model_name in models_to_try:
 
-        print(f"Trying Gemini model: {model_name}")
+        print(f"\nTrying model: {model_name}")
 
-        for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.8,
+                    max_output_tokens=900
+                )
+            )
 
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=0.8,
-                        max_output_tokens=900
-                    )
+            script = extract_script(response)
+
+            if script:
+                print(f"SUCCESS: {model_name}")
+                break
+
+            print("Model returned no usable text.")
+            print("Prompt feedback:", getattr(
+                response, "prompt_feedback", None
+            ))
+
+            candidates = getattr(response, "candidates", None) or []
+
+            for candidate in candidates:
+                print(
+                    "Finish reason:",
+                    getattr(candidate, "finish_reason", None)
+                )
+                print(
+                    "Safety ratings:",
+                    getattr(candidate, "safety_ratings", None)
                 )
 
-                if response and response.text:
-                    print(f"Success with model: {model_name}")
-                    break
+            print("Trying next model...")
 
-                raise RuntimeError("Gemini returned an empty response.")
+        except Exception as error:
 
-            except Exception as error:
+            print(f"Model failed: {model_name}")
+            print("Error:", str(error))
+            print("Trying next model...")
 
-                error_message = str(error)
+            continue
 
-                print(f"Attempt {attempt + 1} failed: {error_message}")
-
-                # Try another model if this model is unavailable
-                if "404" in error_message:
-                    print("Model unavailable. Trying fallback model.")
-                    break
-
-                # Retry temporary server or rate-limit errors
-                temporary_error = any(
-                    code in error_message
-                    for code in [
-                        "503",
-                        "UNAVAILABLE",
-                        "429",
-                        "RESOURCE_EXHAUSTED",
-                        "500",
-                        "INTERNAL"
-                    ]
-                )
-
-                if not temporary_error:
-                    raise
-
-                if attempt < 2:
-                    wait_time = 15 * (2 ** attempt)
-                    print(
-                        f"Temporary problem. "
-                        f"Retrying after {wait_time} seconds..."
-                    )
-                    time.sleep(wait_time)
-
-                else:
-                    print(f"{model_name} failed after 3 attempts.")
-
-        if response and response.text:
-            break
-
-    if not response or not response.text:
+    if not script:
         raise RuntimeError(
-            "All Gemini models failed. "
-            "Please try the workflow again later."
+            "All Gemini models failed to generate a usable script. "
+            "Check the logs for the actual errors."
         )
-
-    script = response.text.strip()
 
     output_dir = Path("output")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     output_file = output_dir / "short_script.txt"
-    output_file.write_text(script, encoding="utf-8")
 
-    print("\nSCRIPT GENERATED SUCCESSFULLY!\n")
-    print(script)
+    output_file.write_text(
+        script,
+        encoding="utf-8"
+    )
+
+    print("\nSCRIPT GENERATED SUCCESSFULLY!")
+    print("\n", script)
+    print("\nSaved at:", output_file)
 
 
 if __name__ == "__main__":
