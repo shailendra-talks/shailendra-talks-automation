@@ -3,6 +3,7 @@ import os
 import re
 import base64
 import subprocess
+import time
 from pathlib import Path
 
 import requests
@@ -14,164 +15,179 @@ PARTS_DIR = OUTPUT / "voice_parts"
 
 API_URL = "https://api.sarvam.ai/text-to-speech"
 
+MAX_SENTENCE_LENGTH = 2000
+MAX_RETRIES = 3
+
 
 def split_sentences(text):
     """
-    IMPORTANT:
-    This function must remain identical to video.py.
-    One sentence = one audio file = one video scene.
+    Split script into speakable sentences.
+    Skip empty text and symbols-only sentences.
     """
-    sentences = re.split(r'(?<=[.!?।])\s+', text.strip())
-    return [s.strip() for s in sentences if s.strip()]
+
+    raw_sentences = re.split(
+        r'(?<=[.!?।])\s+',
+        text.strip()
+    )
+
+    sentences = []
+
+    for sentence in raw_sentences:
+        sentence = sentence.strip()
+
+        if not sentence:
+            continue
+
+        # Keep only sentences containing Hindi or English letters.
+        if not re.search(
+            r'[A-Za-z\u0900-\u097F]',
+            sentence
+        ):
+            continue
+
+        # Remove emojis and unsupported decorative symbols.
+        sentence = re.sub(
+            r'[^\w\s\u0900-\u097F.,!?;:\'"()\-/।]',
+            '',
+            sentence,
+            flags=re.UNICODE
+        ).strip()
+
+        if sentence and re.search(
+            r'[A-Za-z\u0900-\u097F]',
+            sentence
+        ):
+            sentences.append(sentence)
+
+    return sentences
 
 
-def generate_voice():
-    api_key = os.getenv("SARVAM_API_KEY")
+def save_clean_script(sentences):
+    """
+    Save exactly the sentences used for voice generation.
+    video.py reads this same script.
+    """
 
-    if not api_key:
-        raise RuntimeError("SARVAM_API_KEY is missing.")
+    clean_text = " ".join(sentences)
 
-    if not SCRIPT_FILE.exists():
-        raise FileNotFoundError("Script file is missing.")
+    SCRIPT_FILE.write_text(
+        clean_text,
+        encoding="utf-8"
+    )
 
-    text = SCRIPT_FILE.read_text(encoding="utf-8").strip()
 
-    if not text:
-        raise RuntimeError("Script is empty.")
+def request_voice(session, api_key, sentence, index):
 
-    sentences = split_sentences(text)
+    for attempt in range(1, MAX_RETRIES + 1):
 
-    if not sentences:
-        raise RuntimeError("No sentences found.")
-
-    # Sarvam text length safety check.
-    for index, sentence in enumerate(sentences, start=1):
-        if len(sentence) > 2000:
-            raise RuntimeError(
-                f"Sentence {index} has {len(sentence)} characters. "
-                "Please shorten this sentence in the generated script."
+        try:
+            response = session.post(
+                API_URL,
+                headers={
+                    "api-subscription-key": api_key,
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "text": sentence,
+                    "target_language_code": "hi-IN",
+                    "model": "bulbul:v3",
+                    "speaker": "shubh",
+                    "output_audio_codec": "wav"
+                },
+                timeout=120
             )
 
-    PARTS_DIR.mkdir(parents=True, exist_ok=True)
-    OUTPUT.mkdir(parents=True, exist_ok=True)
+            if response.status_code == 200:
+                data = response.json()
 
-    # Remove all old audio files to avoid stale parts.
-    for old_file in PARTS_DIR.glob("*.wav"):
-        old_file.unlink()
+                audios = data.get("audios", [])
 
-    print(f"Total script sentences: {len(sentences)}")
-
-    session = requests.Session()
-    audio_files = []
-
-    for index, sentence in enumerate(sentences, start=1):
-        print(
-            f"\nGenerating audio {index}/{len(sentences)}"
-        )
-
-        response = None
-
-        # Retry temporary network/server failures.
-        for attempt in range(1, 4):
-            try:
-                response = session.post(
-                    API_URL,
-                    headers={
-                        "api-subscription-key": api_key,
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "text": sentence,
-                        "target_language_code": "hi-IN",
-                        "model": "bulbul:v3",
-                        "speaker": "shubh",
-                        "output_audio_codec": "wav"
-                    },
-                    timeout=120
-                )
-
-                if response.status_code == 200:
-                    break
-
-                if response.status_code not in (429, 500, 502, 503, 504):
+                if not audios:
                     raise RuntimeError(
-                        f"Sarvam error in sentence {index}: "
-                        f"{response.status_code} {response.text}"
+                        f"No audio returned for sentence {index}"
                     )
 
-                print(
-                    f"Temporary API error. Attempt {attempt}/3"
+                audio_bytes = base64.b64decode(audios[0])
+
+                if not audio_bytes:
+                    raise RuntimeError(
+                        f"Empty audio returned for sentence {index}"
+                    )
+
+                return audio_bytes
+
+            if response.status_code not in (
+                429, 500, 502, 503, 504
+            ):
+                raise RuntimeError(
+                    f"Sarvam API error in sentence {index}: "
+                    f"{response.status_code} {response.text}"
                 )
 
-            except requests.RequestException as error:
-                print(f"Network error: {error}")
-
-            if attempt < 3:
-                import time
-                time.sleep(attempt * 5)
-
-        if response is None or response.status_code != 200:
-            details = (
-                response.text[:1000]
-                if response is not None
-                else "No response received"
+            print(
+                f"Temporary Sarvam error. "
+                f"Retry {attempt}/{MAX_RETRIES}"
             )
 
-            raise RuntimeError(
-                f"Voice generation failed for sentence {index}: "
-                f"{details}"
+        except requests.RequestException as error:
+
+            print(
+                f"Network error in sentence {index}: {error}"
             )
 
-        data = response.json()
-        audios = data.get("audios", [])
+        if attempt < MAX_RETRIES:
+            time.sleep(attempt * 5)
 
-        if not audios:
-            raise RuntimeError(
-                f"No audio received for sentence {index}"
-            )
+    raise RuntimeError(
+        f"Sarvam failed after {MAX_RETRIES} attempts "
+        f"for sentence {index}."
+    )
 
-        audio_bytes = base64.b64decode(audios[0])
 
-        if not audio_bytes:
-            raise RuntimeError(
-                f"Empty audio received for sentence {index}"
-            )
+def verify_audio(audio_path):
 
-        audio_path = (
-            PARTS_DIR / f"part_{index:03d}.wav"
-        )
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(audio_path)
+        ],
+        capture_output=True,
+        text=True
+    )
 
-        audio_path.write_bytes(audio_bytes)
-
-        # Verify that the generated audio is readable.
-        subprocess.run(
-            [
-                "ffprobe",
-                "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                str(audio_path)
-            ],
-            check=True,
-            capture_output=True,
-            text=True
-        )
-
-        audio_files.append(audio_path)
-
-        print("Saved:", audio_path)
-
-    # Verify exact one-to-one mapping.
-    if len(audio_files) != len(sentences):
+    if result.returncode != 0:
         raise RuntimeError(
-            f"Expected {len(sentences)} audio files, "
-            f"but generated {len(audio_files)}."
+            f"Invalid audio file: {audio_path}\n"
+            f"{result.stderr}"
         )
 
-    # Create combined voiceover.
-    concat_file = OUTPUT / "voice_concat.txt"
+    try:
+        duration = float(result.stdout.strip())
+    except ValueError:
+        raise RuntimeError(
+            f"Could not read audio duration: {audio_path}"
+        )
 
-    with open(concat_file, "w", encoding="utf-8") as file:
+    if duration <= 0:
+        raise RuntimeError(
+            f"Audio duration is zero: {audio_path}"
+        )
+
+
+def combine_audio(audio_files):
+
+    concat_file = OUTPUT / "voice_concat.txt"
+    combined_file = OUTPUT / "voiceover.wav"
+
+    with open(
+        concat_file,
+        "w",
+        encoding="utf-8"
+    ) as file:
+
         for audio_path in audio_files:
             file.write(
                 f"file '{audio_path.resolve()}'\n"
@@ -185,15 +201,124 @@ def generate_voice():
             "-safe", "0",
             "-i", str(concat_file),
             "-c:a", "pcm_s16le",
-            str(OUTPUT / "voiceover.wav")
+            str(combined_file)
         ],
         check=True
     )
 
-    print("\nVOICE GENERATION SUCCESSFUL!")
+    print("Combined voice created:", combined_file)
+
+
+def generate_voice():
+
+    print("\nSTARTING SHAILENDRA TALKS VOICE GENERATOR\n")
+
+    api_key = os.getenv("SARVAM_API_KEY")
+
+    if not api_key:
+        raise RuntimeError(
+            "SARVAM_API_KEY is missing from GitHub Secrets."
+        )
+
+    if not SCRIPT_FILE.exists():
+        raise FileNotFoundError(
+            "output/short_script.txt does not exist."
+        )
+
+    original_text = SCRIPT_FILE.read_text(
+        encoding="utf-8"
+    ).strip()
+
+    if not original_text:
+        raise RuntimeError(
+            "Generated script is empty."
+        )
+
+    # Create the canonical sentence list.
+    sentences = split_sentences(original_text)
+
+    if not sentences:
+        raise RuntimeError(
+            "No supported Hindi or English sentences found."
+        )
+
+    # Check sentence length before API calls.
+    for index, sentence in enumerate(sentences, start=1):
+
+        if len(sentence) > MAX_SENTENCE_LENGTH:
+            raise RuntimeError(
+                f"Sentence {index} contains "
+                f"{len(sentence)} characters. "
+                "Please shorten the script sentence."
+            )
+
+    # Update script to match exactly the spoken sentences.
+    save_clean_script(sentences)
+
+    OUTPUT.mkdir(parents=True, exist_ok=True)
+    PARTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Remove old audio files.
+    for old_file in PARTS_DIR.glob("*.wav"):
+        old_file.unlink()
+
+    print("Total speakable sentences:", len(sentences))
+
+    session = requests.Session()
+
+    audio_files = []
+
+    for index, sentence in enumerate(
+        sentences,
+        start=1
+    ):
+
+        print(
+            f"\nGenerating voice "
+            f"{index}/{len(sentences)}"
+        )
+
+        print("Text:", sentence)
+
+        audio_bytes = request_voice(
+            session,
+            api_key,
+            sentence,
+            index
+        )
+
+        audio_path = (
+            PARTS_DIR /
+            f"part_{index:03d}.wav"
+        )
+
+        audio_path.write_bytes(audio_bytes)
+
+        verify_audio(audio_path)
+
+        audio_files.append(audio_path)
+
+        print("Saved:", audio_path)
+
+        # Small delay between API requests.
+        time.sleep(1)
+
+    # Final consistency check.
+    if len(audio_files) != len(sentences):
+        raise RuntimeError(
+            f"Mismatch: {len(sentences)} sentences, "
+            f"{len(audio_files)} audio files."
+        )
+
+    combine_audio(audio_files)
+
+    print("\n================================")
+    print("VOICE GENERATION SUCCESSFUL")
+    print("================================")
     print("Script sentences:", len(sentences))
-    print("Separate audio files:", len(audio_files))
-    print("Combined voice:", OUTPUT / "voiceover.wav")
+    print("Audio files:", len(audio_files))
+    print("Combined voice: output/voiceover.wav")
+    print("================================\n")
 
 
 if __name__ == "__main__":
