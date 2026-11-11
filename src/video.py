@@ -1,50 +1,51 @@
 
 import os
-import re
 import json
-import time
+import random
 import subprocess
+import textwrap
 from pathlib import Path
 
 import requests
 from PIL import Image, ImageDraw, ImageFont
 
 
+# =====================================================
+# CONFIGURATION
+# =====================================================
+
 OUTPUT = Path("output")
-SCRIPT_FILE = OUTPUT / "short_script.txt"
+SCENES_FILE = OUTPUT / "scenes.json"
+
 PARTS_DIR = OUTPUT / "voice_parts"
-SCENES_DIR = OUTPUT / "scenes"
+FOOTAGE_DIR = OUTPUT / "footage"
 SEGMENTS_DIR = OUTPUT / "segments"
 
-CACHE_FILE = OUTPUT / "pixabay_cache.json"
+FINAL_VIDEO = OUTPUT / "short_video.mp4"
+SUBTITLE_FILE = OUTPUT / "captions.srt"
 
 WIDTH = 720
 HEIGHT = 1280
 FPS = 25
 
-PALETTES = [
-    ((8, 20, 42), (20, 65, 105), (0, 210, 190)),
-    ((28, 12, 48), (83, 32, 105), (255, 180, 65)),
-    ((12, 35, 32), (20, 100, 78), (150, 230, 120)),
-    ((45, 17, 20), (120, 38, 48), (255, 190, 110)),
-    ((15, 25, 55), (45, 65, 130), (120, 190, 255)),
-]
+PIXABAY_URL = "https://pixabay.com/api/videos/"
+
+USED_VIDEO_IDS = set()
 
 
-def run_command(command):
+# =====================================================
+# GENERAL UTILITIES
+# =====================================================
+
+def run(command):
     subprocess.run(command, check=True)
-
-
-def split_sentences(text):
-    # Keep the same sentence splitting method as voice.py.
-    sentences = re.split(r'(?<=[.!?।])\s+', text.strip())
-    return [s.strip() for s in sentences if s.strip()]
 
 
 def get_duration(audio_path):
     result = subprocess.run(
         [
-            "ffprobe", "-v", "error",
+            "ffprobe",
+            "-v", "error",
             "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1",
             str(audio_path)
@@ -53,433 +54,353 @@ def get_duration(audio_path):
         text=True,
         check=True
     )
-    return float(result.stdout.strip())
 
+    duration = float(result.stdout.strip())
 
-def get_font(size):
-    candidates = [
-        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansDevanagariUI-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"
-    ]
-
-    for path in candidates:
-        if Path(path).exists():
-            return ImageFont.truetype(path, size)
-
-    return ImageFont.load_default()
-
-
-def query_for_sentence(sentence, index):
-    text = sentence.lower()
-
-    topics = [
-        (
-            ["parliament", "politics", "political", "election",
-             "government", "leader", "minister", "sarkar",
-             "neta", "chunav", "राजनीति", "सरकार", "चुनाव"],
-            [
-                "india parliament political",
-                "indian election campaign crowd",
-                "government building india",
-                "politician public speech"
-            ]
-        ),
-        (
-            ["education", "school", "college", "student",
-             "teacher", "शिक्षा", "स्कूल", "कॉलेज", "छात्र"],
-            [
-                "students classroom education",
-                "college students studying",
-                "school classroom india",
-                "university campus students"
-            ]
-        ),
-        (
-            ["police", "crime", "court", "justice", "law",
-             "अदालत", "न्याय", "कानून", "अपराध"],
-            [
-                "police officer india",
-                "courthouse justice law",
-                "courtroom legal system",
-                "police investigation crime"
-            ]
-        ),
-        (
-            ["money", "finance", "business", "economy",
-             "paisa", "महंगाई", "पैसा", "बैंक", "व्यापार"],
-            [
-                "money finance business",
-                "indian market shopping",
-                "business office finance",
-                "counting money cash"
-            ]
-        ),
-        (
-            ["social media", "internet", "mobile", "phone",
-             "instagram", "youtube", "सोशल मीडिया", "मोबाइल"],
-            [
-                "smartphone social media",
-                "person using mobile phone",
-                "social media technology",
-                "digital technology internet"
-            ]
-        ),
-        (
-            ["traffic", "road", "city", "transport",
-             "सड़क", "शहर", "ट्रैफिक"],
-            [
-                "india city traffic street",
-                "busy indian road traffic",
-                "urban city street people",
-                "vehicles traffic city"
-            ]
-        ),
-        (
-            ["hospital", "doctor", "health", "medical",
-             "अस्पताल", "डॉक्टर", "स्वास्थ्य"],
-            [
-                "hospital doctor healthcare",
-                "medical hospital corridor",
-                "doctor patient consultation",
-                "healthcare medical team"
-            ]
-        ),
-        (
-            ["environment", "pollution", "climate", "nature",
-             "प्रदूषण", "पर्यावरण", "पेड़"],
-            [
-                "environment pollution city",
-                "air pollution urban city",
-                "forest nature environment",
-                "climate change environment"
-            ]
-        ),
-        (
-            ["protest", "public", "crowd", "people",
-             "जनता", "प्रदर्शन", "आंदोलन"],
-            [
-                "people crowd public protest",
-                "public gathering crowd",
-                "people walking city",
-                "large crowd demonstration"
-            ]
-        ),
-        (
-            ["family", "middle class", "ghar", "परिवार",
-             "मध्यम वर्ग", "घर"],
-            [
-                "indian family daily life",
-                "family sitting living room",
-                "middle class family home",
-                "indian household daily life"
-            ]
+    if duration <= 0:
+        raise RuntimeError(
+            f"Invalid audio duration: {audio_path}"
         )
-    ]
 
-    for keywords, queries in topics:
-        if any(word in text for word in keywords):
-            return queries[index % len(queries)]
-
-    general_queries = [
-        "indian city documentary people",
-        "people walking urban street",
-        "indian lifestyle documentary",
-        "busy city life india"
-    ]
-
-    return general_queries[index % len(general_queries)]
+    return duration
 
 
-def load_cache():
-    if CACHE_FILE.exists():
-        try:
-            return json.loads(
-                CACHE_FILE.read_text(encoding="utf-8")
-            )
-        except Exception:
-            pass
+def get_font(size, bold=False):
 
-    return {}
-
-
-def save_cache(cache):
-    OUTPUT.mkdir(parents=True, exist_ok=True)
-
-    CACHE_FILE.write_text(
-        json.dumps(cache, ensure_ascii=False, indent=2),
-        encoding="utf-8"
-    )
-
-
-def search_pixabay(query, api_key, cache):
-    now = time.time()
-    cached = cache.get(query)
-
-    if cached and now - cached.get("time", 0) < 86400:
-        return cached.get("hits", [])
-
-    response = requests.get(
-        "https://pixabay.com/api/videos/",
-        params={
-            "key": api_key,
-            "q": query,
-            "per_page": 20,
-            "safesearch": "true"
-        },
-        timeout=45
-    )
-
-    response.raise_for_status()
-    hits = response.json().get("hits", [])
-
-    cache[query] = {
-        "time": now,
-        "hits": hits
-    }
-
-    save_cache(cache)
-    return hits
-
-
-def download_footage(
-    sentence, index, api_key, cache, used_ids, credits
-):
-    query = query_for_sentence(sentence, index)
-
-    print(f"Searching visual for scene {index + 1}: {query}")
-
-    try:
-        hits = search_pixabay(query, api_key, cache)
-
-        # Never reuse an already-used video.
-        available = [
-            hit for hit in hits
-            if hit.get("id") not in used_ids
-            and hit.get("videos", {}).get("medium", {}).get("url")
+    if bold:
+        candidates = [
+            "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        ]
+    else:
+        candidates = [
+            "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
         ]
 
-        if not available:
-            print("No new unique Pixabay footage found.")
-            return None
+    for font_path in candidates:
+        if Path(font_path).exists():
+            try:
+                return ImageFont.truetype(
+                    font_path,
+                    size=size,
+                    layout_engine=ImageFont.Layout.RAQM
+                )
+            except Exception:
+                return ImageFont.truetype(font_path, size=size)
 
-        hit = available[0]
-        video_id = hit.get("id")
+    raise RuntimeError(
+        "No suitable font found. Check fonts-noto-core installation."
+    )
 
-        video_url = hit["videos"]["medium"]["url"]
-        video_path = SCENES_DIR / f"footage_{index + 1:03d}.mp4"
 
-        response = requests.get(
-            video_url,
-            timeout=120,
-            stream=True
-        )
-        response.raise_for_status()
+# =====================================================
+# PIXABAY FOOTAGE
+# =====================================================
 
-        with open(video_path, "wb") as file:
-            for chunk in response.iter_content(1024 * 1024):
-                if chunk:
-                    file.write(chunk)
+def download_footage(query, scene_number, api_key):
 
-        used_ids.add(video_id)
-
-        credits.append(
-            f"Scene {index + 1}: "
-            f"{hit.get('user', 'Pixabay contributor')} - "
-            f"{hit.get('pageURL', 'Pixabay')}"
-        )
-
-        print(f"Downloaded unique footage ID: {video_id}")
-
-        return video_path
-
-    except Exception as error:
-        print("Pixabay error:", error)
+    if not api_key:
+        print("Pixabay API key missing. Using fallback background.")
         return None
 
-
-def create_fallback_background(index):
-    top, bottom, accent = PALETTES[index % len(PALETTES)]
-
-    image = Image.new("RGB", (WIDTH, HEIGHT))
-    pixels = image.load()
-
-    for y in range(HEIGHT):
-        ratio = y / HEIGHT
-
-        color = tuple(
-            int(top[c] * (1 - ratio) + bottom[c] * ratio)
-            for c in range(3)
+    try:
+        response = requests.get(
+            PIXABAY_URL,
+            params={
+                "key": api_key,
+                "q": query,
+                "per_page": 20,
+                "safesearch": "true"
+            },
+            timeout=30
         )
 
-        for x in range(WIDTH):
-            pixels[x, y] = color
+        response.raise_for_status()
+
+        hits = response.json().get("hits", [])
+        random.shuffle(hits)
+
+        for hit in hits:
+
+            video_id = hit.get("id")
+
+            if video_id in USED_VIDEO_IDS:
+                continue
+
+            videos = hit.get("videos", {})
+
+            video_data = (
+                videos.get("large")
+                or videos.get("medium")
+                or videos.get("small")
+            )
+
+            if not video_data:
+                continue
+
+            video_url = video_data.get("url")
+
+            if not video_url:
+                continue
+
+            download = requests.get(
+                video_url,
+                timeout=90
+            )
+
+            download.raise_for_status()
+
+            if len(download.content) < 10000:
+                continue
+
+            footage_path = (
+                FOOTAGE_DIR /
+                f"scene_{scene_number:03d}.mp4"
+            )
+
+            footage_path.write_bytes(download.content)
+
+            USED_VIDEO_IDS.add(video_id)
+
+            print(
+                f"Footage downloaded for scene {scene_number}: "
+                f"{query}"
+            )
+
+            return footage_path
+
+    except Exception as error:
+        print(
+            f"Pixabay error in scene {scene_number}: {error}"
+        )
+
+    print(
+        f"No suitable footage found for scene {scene_number}."
+    )
+
+    return None
+
+
+# =====================================================
+# FALLBACK BACKGROUND
+# =====================================================
+
+def create_background(scene_number):
+
+    random.seed(scene_number)
+
+    image = Image.new(
+        "RGB",
+        (WIDTH, HEIGHT)
+    )
 
     draw = ImageDraw.Draw(image)
 
-    pattern = index % 5
+    top = (
+        random.randint(10, 35),
+        random.randint(15, 45),
+        random.randint(35, 75)
+    )
 
-    if pattern == 0:
-        draw.ellipse(
-            (350, 150, 850, 650),
-            outline=accent,
-            width=10
-        )
+    bottom = (
+        random.randint(35, 80),
+        random.randint(15, 35),
+        random.randint(25, 60)
+    )
 
-    elif pattern == 1:
-        for x in range(-300, WIDTH, 90):
-            draw.line(
-                (x, 0, x + 500, HEIGHT),
-                fill=accent,
-                width=4
+    for y in range(HEIGHT):
+
+        ratio = y / HEIGHT
+
+        color = tuple(
+            int(
+                top[i] * (1 - ratio)
+                + bottom[i] * ratio
             )
-
-    elif pattern == 2:
-        draw.rectangle(
-            (70, 250, 650, 260),
-            fill=accent
+            for i in range(3)
         )
+
+        draw.line(
+            (0, y, WIDTH, y),
+            fill=color
+        )
+
+    for _ in range(10):
+
+        x = random.randint(-100, WIDTH)
+        y = random.randint(-100, HEIGHT)
+        radius = random.randint(50, 170)
+
         draw.ellipse(
-            (100, 700, 600, 1200),
-            outline=accent,
-            width=8
+            (
+                x - radius,
+                y - radius,
+                x + radius,
+                y + radius
+            ),
+            outline=(100, 110, 140),
+            width=2
         )
 
-    elif pattern == 3:
-        for y in range(200, 1100, 130):
-            draw.rounded_rectangle(
-                (70, y, 650, y + 35),
-                radius=15,
-                fill=accent
-            )
+    path = (
+        FOOTAGE_DIR /
+        f"background_{scene_number:03d}.jpg"
+    )
 
-    else:
-        draw.polygon(
-            [(360, 200), (650, 650), (360, 1100), (70, 650)],
-            outline=accent,
-            width=10
-        )
-
-    path = SCENES_DIR / f"fallback_{index + 1:03d}.png"
-    image.save(path)
+    image.save(path, quality=90)
 
     return path
 
 
-def wrap_text(draw, text, font, max_width):
+# =====================================================
+# CAPTION GENERATION
+# =====================================================
+
+def wrap_text(text, font, draw, max_width):
+
     words = text.split()
     lines = []
-    current = ""
+    current_line = ""
 
     for word in words:
-        test = f"{current} {word}".strip()
-        box = draw.textbbox((0, 0), test, font=font)
 
-        if box[2] - box[0] <= max_width:
-            current = test
+        test_line = (
+            current_line + " " + word
+        ).strip()
+
+        bbox = draw.textbbox(
+            (0, 0),
+            test_line,
+            font=font
+        )
+
+        text_width = bbox[2] - bbox[0]
+
+        if text_width <= max_width:
+            current_line = test_line
+
         else:
-            if current:
-                lines.append(current)
+            if current_line:
+                lines.append(current_line)
 
-            current = word
+            current_line = word
 
-    if current:
-        lines.append(current)
+    if current_line:
+        lines.append(current_line)
 
     return lines
 
 
-def create_overlay(sentence, index, is_pixabay):
-    _, _, accent = PALETTES[index % len(PALETTES)]
+def create_caption(scene_number, narration):
 
-    overlay = Image.new(
+    image = Image.new(
         "RGBA",
         (WIDTH, HEIGHT),
         (0, 0, 0, 0)
     )
 
-    draw = ImageDraw.Draw(overlay)
+    draw = ImageDraw.Draw(image)
 
-    # Top branding
+    brand_font = get_font(25, bold=True)
+    caption_font = get_font(39, bold=True)
+
+    # Channel branding
     draw.rounded_rectangle(
-        (35, 55, 390, 120),
+        (35, 55, 365, 110),
         radius=18,
-        fill=(0, 0, 0, 175)
+        fill=(0, 0, 0, 185)
     )
 
     draw.text(
-        (55, 72),
+        (52, 65),
         "SHAILENDRA TALKS",
-        font=get_font(25),
-        fill=(255, 255, 255, 255)
+        font=brand_font,
+        fill=(255, 220, 80, 255)
     )
+
+    # Captions contain only spoken narration.
+    lines = wrap_text(
+        narration,
+        caption_font,
+        draw,
+        620
+    )
+
+    if len(lines) > 4:
+        raise RuntimeError(
+            f"Scene {scene_number} caption is too long. "
+            "Split the narration into shorter scenes."
+        )
+
+    line_height = 57
+    panel_height = len(lines) * line_height + 45
+
+    panel_top = HEIGHT - panel_height - 105
 
     draw.rounded_rectangle(
-        (35, 145, 200, 153),
-        radius=4,
-        fill=(*accent, 255)
+        (
+            25,
+            panel_top,
+            WIDTH - 25,
+            HEIGHT - 80
+        ),
+        radius=22,
+        fill=(0, 0, 0, 210)
     )
 
-    # Subtitle panel
-    draw.rounded_rectangle(
-        (28, 935, 692, 1195),
-        radius=25,
-        fill=(0, 0, 0, 215),
-        outline=(*accent, 255),
-        width=3
-    )
-
-    font_size = 38
-    lines = []
-
-    while font_size >= 22:
-        font = get_font(font_size)
-        lines = wrap_text(draw, sentence, font, 590)
-
-        if len(lines) <= 3:
-            break
-
-        font_size -= 2
-
-    font = get_font(font_size)
-
-    # Keep the full sentence readable.
-    line_height = font_size + 18
-    total_height = len(lines) * line_height
-    y = 1065 - total_height // 2
+    y = panel_top + 20
 
     for line in lines:
-        box = draw.textbbox((0, 0), line, font=font)
-        line_width = box[2] - box[0]
-        x = (WIDTH - line_width) // 2
+
+        bbox = draw.textbbox(
+            (0, 0),
+            line,
+            font=caption_font
+        )
+
+        text_width = bbox[2] - bbox[0]
+        x = (WIDTH - text_width) // 2
+
+        draw.text(
+            (x + 2, y + 3),
+            line,
+            font=caption_font,
+            fill=(0, 0, 0, 255)
+        )
 
         draw.text(
             (x, y),
             line,
-            font=font,
-            fill=(255, 255, 255, 255)
+            font=caption_font,
+            fill=(255, 255, 255, 255),
+            stroke_width=1,
+            stroke_fill=(0, 0, 0, 255)
         )
 
         y += line_height
 
-    source_text = "PIXABAY FOOTAGE" if is_pixabay else "ANIMATED SCENE"
-
-    draw.text(
-        (465, 1210),
-        source_text,
-        font=get_font(16),
-        fill=(255, 255, 255, 220)
+    caption_path = (
+        OUTPUT /
+        f"caption_{scene_number:03d}.png"
     )
 
-    path = SCENES_DIR / f"overlay_{index + 1:03d}.png"
-    overlay.save(path)
+    image.save(caption_path)
 
-    return path
+    return caption_path
 
 
-def format_srt_time(seconds):
-    milliseconds = round(seconds * 1000)
+# =====================================================
+# SRT SUBTITLES
+# =====================================================
+
+def format_timestamp(seconds):
+
+    milliseconds = int(
+        round(seconds * 1000)
+    )
 
     hours = milliseconds // 3600000
     milliseconds %= 3600000
@@ -491,234 +412,312 @@ def format_srt_time(seconds):
     milliseconds %= 1000
 
     return (
-        f"{hours:02}:{minutes:02}:{secs:02},"
+        f"{hours:02}:"
+        f"{minutes:02}:"
+        f"{secs:02},"
         f"{milliseconds:03}"
     )
 
 
-def create_segment(
-    background, audio, overlay, duration, output_path
-):
-    is_video = background.suffix.lower() == ".mp4"
+def create_srt(scenes, durations):
 
-    command = ["ffmpeg", "-y"]
+    current_time = 0
+    entries = []
 
-    if is_video:
-        command += [
-            "-stream_loop", "-1",
-            "-i", str(background)
-        ]
-    else:
-        command += [
-            "-loop", "1",
-            "-framerate", str(FPS),
-            "-i", str(background)
-        ]
+    for index, scene in enumerate(scenes):
 
-    command += [
-        "-i", str(audio),
-        "-loop", "1",
-        "-framerate", str(FPS),
-        "-i", str(overlay),
-        "-filter_complex",
-        (
-            "[0:v]"
-            "scale=720:1280:force_original_aspect_ratio=increase,"
-            "crop=720:1280,"
-            "fps=25,"
-            "setsar=1[bg];"
-            "[2:v]format=rgba[ov];"
-            "[bg][ov]overlay=0:0:format=auto,"
-            "format=yuv420p[v]"
-        ),
-        "-map", "[v]",
-        "-map", "1:a",
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-crf", "23",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-ar", "44100",
-        "-t", str(duration),
-        "-r", str(FPS),
-        "-pix_fmt", "yuv420p",
-        "-movflags", "+faststart",
-        str(output_path)
-    ]
-
-    run_command(command)
-
-
-def generate_video():
-    OUTPUT.mkdir(parents=True, exist_ok=True)
-    SCENES_DIR.mkdir(parents=True, exist_ok=True)
-    SEGMENTS_DIR.mkdir(parents=True, exist_ok=True)
-
-    api_key = os.getenv("PIXABAY_API_KEY")
-
-    if not api_key:
-        raise RuntimeError(
-            "PIXABAY_API_KEY is missing in GitHub Secrets."
-        )
-
-    if not SCRIPT_FILE.exists():
-        raise FileNotFoundError("Script file not found.")
-
-    script = SCRIPT_FILE.read_text(
-        encoding="utf-8"
-    ).strip()
-
-    sentences = split_sentences(script)
-
-    audio_files = sorted(
-        PARTS_DIR.glob("part_*.wav")
-    )
-
-    if not sentences:
-        raise RuntimeError("No sentences found in script.")
-
-    if len(sentences) != len(audio_files):
-        raise RuntimeError(
-            f"Audio/script mismatch: {len(sentences)} sentences "
-            f"but {len(audio_files)} audio parts. "
-            "Check the sentence splitting in voice.py."
-        )
-
-    # Clean old generated scenes and segments.
-    for folder in [SCENES_DIR, SEGMENTS_DIR]:
-        for old_file in folder.iterdir():
-            if old_file.is_file():
-                old_file.unlink()
-
-    cache = load_cache()
-    used_ids = set()
-    credits = []
-
-    subtitles = []
-    segment_files = []
-
-    current_time = 0.0
-
-    print(f"Total sentences: {len(sentences)}")
-    print(f"Total audio parts: {len(audio_files)}")
-
-    for index, (sentence, audio_path) in enumerate(
-        zip(sentences, audio_files)
-    ):
-        print(
-            f"\nCreating scene {index + 1}/{len(sentences)}"
-        )
-
-        duration = get_duration(audio_path)
-
-        if duration <= 0:
-            raise RuntimeError(
-                f"Invalid audio duration: {audio_path}"
-            )
-
-        footage = download_footage(
-            sentence,
-            index,
-            api_key,
-            cache,
-            used_ids,
-            credits
-        )
-
-        is_pixabay = footage is not None
-
-        if footage is None:
-            print("Creating a different animated fallback scene.")
-            footage = create_fallback_background(index)
-
-        overlay = create_overlay(
-            sentence,
-            index,
-            is_pixabay
-        )
-
-        segment_path = (
-            SEGMENTS_DIR /
-            f"segment_{index + 1:03d}.mp4"
-        )
-
-        create_segment(
-            footage,
-            audio_path,
-            overlay,
-            duration,
-            segment_path
-        )
-
-        segment_files.append(segment_path)
+        narration = scene["narration"].strip()
+        duration = durations[index]
 
         start = current_time
         end = current_time + duration
 
-        subtitles.append(
+        entries.append(
             f"{index + 1}\n"
-            f"{format_srt_time(start)} --> "
-            f"{format_srt_time(end)}\n"
-            f"{sentence}\n"
+            f"{format_timestamp(start)} --> "
+            f"{format_timestamp(end)}\n"
+            f"{narration}\n"
         )
 
         current_time = end
 
-    # Save subtitles with separate timing for every sentence.
-    (OUTPUT / "captions.srt").write_text(
-        "\n".join(subtitles),
+    SUBTITLE_FILE.write_text(
+        "\n".join(entries),
         encoding="utf-8"
     )
 
-    # Save footage credits.
-    (OUTPUT / "pixabay_credits.txt").write_text(
-        "\n".join(credits)
-        if credits
-        else "No Pixabay footage was downloaded.",
-        encoding="utf-8"
+
+# =====================================================
+# SCENE VIDEO GENERATION
+# =====================================================
+
+def create_scene_video(
+    scene_number,
+    footage_path,
+    audio_path,
+    caption_path
+):
+
+    duration = get_duration(audio_path)
+
+    segment_path = (
+        SEGMENTS_DIR /
+        f"segment_{scene_number:03d}.mp4"
     )
 
-    save_cache(cache)
+    if footage_path.suffix.lower() in (
+        ".jpg",
+        ".jpeg",
+        ".png"
+    ):
 
-    # Create concat list.
-    concat_path = OUTPUT / "video_concat.txt"
-
-    with open(
-        concat_path, "w", encoding="utf-8"
-    ) as file:
-        for segment in segment_files:
-            safe_path = str(segment.resolve()).replace(
-                "'", "'\\''"
-            )
-            file.write(f"file '{safe_path}'\n")
-
-    final_video = OUTPUT / "short_video.mp4"
-
-    # Re-encode final output to avoid timestamp/stream-copy issues.
-    run_command(
-        [
-            "ffmpeg", "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(concat_path),
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-crf", "23",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-r", str(FPS),
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
-            str(final_video)
+        video_input = [
+            "-loop", "1",
+            "-framerate", str(FPS),
+            "-i", str(footage_path)
         ]
+
+    else:
+
+        video_input = [
+            "-stream_loop", "-1",
+            "-i", str(footage_path)
+        ]
+
+    command = [
+        "ffmpeg",
+        "-y",
+        *video_input,
+
+        "-i", str(audio_path),
+
+        "-loop", "1",
+        "-framerate", str(FPS),
+        "-i", str(caption_path),
+
+        "-filter_complex",
+        (
+            "[0:v]"
+            "scale=720:1280:"
+            "force_original_aspect_ratio=increase,"
+            "crop=720:1280,"
+            "setsar=1,"
+            "fps=25"
+            "[base];"
+            "[2:v]"
+            "format=rgba"
+            "[caption];"
+            "[base][caption]"
+            "overlay=0:0:shortest=1,"
+            "format=yuv420p"
+            "[outv]"
+        ),
+
+        "-map", "[outv]",
+        "-map", "1:a",
+
+        "-t", f"{duration:.3f}",
+
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "23",
+
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-ar", "44100",
+
+        "-r", str(FPS),
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+
+        str(segment_path)
+    ]
+
+    run(command)
+
+    return segment_path
+
+
+# =====================================================
+# FINAL VIDEO
+# =====================================================
+
+def combine_segments(segments):
+
+    concat_file = OUTPUT / "segments_concat.txt"
+
+    with concat_file.open(
+        "w",
+        encoding="utf-8"
+    ) as file:
+
+        for segment in segments:
+            file.write(
+                f"file '{segment.resolve()}'\n"
+            )
+
+    run([
+        "ffmpeg",
+        "-y",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", str(concat_file),
+
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "23",
+
+        "-c:a", "aac",
+        "-b:a", "128k",
+
+        "-pix_fmt", "yuv420p",
+        "-r", str(FPS),
+        "-movflags", "+faststart",
+
+        str(FINAL_VIDEO)
+    ])
+
+
+# =====================================================
+# MAIN VIDEO GENERATOR
+# =====================================================
+
+def generate_video():
+
+    print("\nSTARTING VIDEO GENERATION\n")
+
+    OUTPUT.mkdir(parents=True, exist_ok=True)
+    FOOTAGE_DIR.mkdir(parents=True, exist_ok=True)
+    SEGMENTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    if not SCENES_FILE.exists():
+        raise FileNotFoundError(
+            "output/scenes.json is missing. "
+            "Run scripts.py first."
+        )
+
+    data = json.loads(
+        SCENES_FILE.read_text(
+            encoding="utf-8"
+        )
     )
 
-    print("\nVIDEO GENERATION SUCCESSFUL")
-    print("Scenes created:", len(segment_files))
-    print("Unique Pixabay videos:", len(used_ids))
-    print("Final video:", final_video)
-    print("Captions:", OUTPUT / "captions.srt")
-    print("Credits:", OUTPUT / "pixabay_credits.txt")
+    scenes = data.get("scenes", [])
+
+    if not scenes:
+        raise RuntimeError(
+            "No scenes found in scenes.json."
+        )
+
+    # Important: match the exact filenames created by voice.py.
+    audio_files = []
+
+    for index in range(1, len(scenes) + 1):
+
+        audio_path = (
+            PARTS_DIR /
+            f"scene_{index:03d}.wav"
+        )
+
+        if not audio_path.exists():
+            raise FileNotFoundError(
+                f"Audio missing: {audio_path}. "
+                "Run python -m src.voice successfully first."
+            )
+
+        audio_files.append(audio_path)
+
+    print("Scenes found:", len(scenes))
+    print("Matching audio files:", len(audio_files))
+
+    # Remove old generated segments.
+    for old_file in SEGMENTS_DIR.glob("*.mp4"):
+        old_file.unlink()
+
+    for old_file in OUTPUT.glob("caption_*.png"):
+        old_file.unlink()
+
+    api_key = os.getenv("PIXABAY_API_KEY")
+
+    segments = []
+    durations = []
+
+    for index, scene in enumerate(
+        scenes,
+        start=1
+    ):
+
+        narration = str(
+            scene.get("narration", "")
+        ).strip()
+
+        visual_query = str(
+            scene.get("visual_query", "")
+        ).strip()
+
+        if not narration:
+            raise RuntimeError(
+                f"Scene {index} has empty narration."
+            )
+
+        audio_path = audio_files[index - 1]
+
+        print(
+            f"\nCreating scene {index}/{len(scenes)}"
+        )
+
+        print("Visual query:", visual_query)
+
+        footage_path = download_footage(
+            visual_query or "Indian daily life",
+            index,
+            api_key
+        )
+
+        if footage_path is None:
+            footage_path = create_background(index)
+
+        caption_path = create_caption(
+            index,
+            narration
+        )
+
+        duration = get_duration(audio_path)
+        durations.append(duration)
+
+        segment = create_scene_video(
+            index,
+            footage_path,
+            audio_path,
+            caption_path
+        )
+
+        segments.append(segment)
+
+        print("Scene completed:", index)
+
+    if len(segments) != len(scenes):
+        raise RuntimeError(
+            "Final scene count does not match."
+        )
+
+    combine_segments(segments)
+
+    create_srt(scenes, durations)
+
+    if not FINAL_VIDEO.exists() or FINAL_VIDEO.stat().st_size == 0:
+        raise RuntimeError(
+            "Final video was not created correctly."
+        )
+
+    print("\n================================")
+    print("VIDEO GENERATION SUCCESSFUL")
+    print("================================")
+    print("Scenes:", len(scenes))
+    print("Audio parts:", len(audio_files))
+    print("Final video:", FINAL_VIDEO)
+    print("Subtitles:", SUBTITLE_FILE)
+    print("================================")
 
 
 if __name__ == "__main__":
