@@ -4,13 +4,22 @@ name: Shailendra Talks - AI Shorts Generator
 on:
   workflow_dispatch:
 
+  # Daily run at 6:00 PM IST (12:30 UTC)
+  # Enable only after the test video is approved.
+  # schedule:
+  #   - cron: "30 12 * * *"
+
 permissions:
   contents: read
+
+concurrency:
+  group: shailendra-talks-video
+  cancel-in-progress: false
 
 jobs:
   generate-video:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
 
     steps:
       - name: Download project
@@ -20,51 +29,64 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Install FFmpeg
+      - name: Install FFmpeg and fonts
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg fonts-noto-core
+          sudo apt-get install -y ffmpeg fonts-noto-core fonts-noto-extra
           ffmpeg -version
           ffprobe -version
 
-      - name: Restore Pixabay video cache
-        uses: actions/cache@v4
-        with:
-          path: output/pixabay_cache.json
-          key: pixabay-video-cache-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: |
-            pixabay-video-cache-
+      - name: Create output folders
+        run: |
+          mkdir -p output
+          mkdir -p output/voice_parts
+          mkdir -p output/footage
+          mkdir -p output/segments
 
-      - name: Generate AI script
+      - name: Generate clean AI script
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-        run: python -m src.scripts
+        run: |
+          python -m src.scripts
 
-      - name: Generate AI voice
+      - name: Generate scene-wise AI voice
         env:
           SARVAM_API_KEY: ${{ secrets.SARVAM_API_KEY }}
-        run: python -m src.voice
+        run: |
+          python -m src.voice
 
-      - name: Generate Hybrid Documentary Video
+      - name: Generate documentary-style video
         env:
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
-        run: python -m src.video
+        run: |
+          python -m src.video
 
-      - name: Save final video and assets
+      - name: Verify final video
+        run: |
+          test -s output/short_video.mp4
+          ffprobe -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            output/short_video.mp4
+
+      - name: Save generated video and assets
         uses: actions/upload-artifact@v4
         with:
-          name: shailendra-talks-final-video
+          name: shailendra-talks-test-video
           path: |
             output/short_video.mp4
             output/short_script.txt
+            output/scenes.json
             output/voiceover.wav
-            output/captions.srt
-            output/pixabay_credits.txt
+            output/voice_parts/
+            output/footage/
           if-no-files-found: error
           retention-days: 7
