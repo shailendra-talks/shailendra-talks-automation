@@ -1,96 +1,137 @@
 
 import os
+import re
 import base64
+import subprocess
 from pathlib import Path
 import requests
 
 
-def generate_voice():
+OUTPUT = Path("output")
+SCRIPT_FILE = OUTPUT / "short_script.txt"
+PARTS_DIR = OUTPUT / "voice_parts"
 
-    # 1. Check API key
+
+def split_sentences(text):
+    sentences = re.split(r'(?<=[.!?।])\s+', text.strip())
+    sentences = [s.strip() for s in sentences if s.strip()]
+
+    result = []
+    current = ""
+
+    for sentence in sentences:
+        if len(sentence) > 2000:
+            words = sentence.split()
+            for word in words:
+                if len(current) + len(word) + 1 > 1200:
+                    if current:
+                        result.append(current.strip())
+                    current = word
+                else:
+                    current += " " + word
+        elif len(current) + len(sentence) + 1 <= 1200:
+            current += " " + sentence
+        else:
+            if current:
+                result.append(current.strip())
+            current = sentence
+
+    if current:
+        result.append(current.strip())
+
+    return result
+
+
+def generate_voice():
     api_key = os.getenv("SARVAM_API_KEY")
 
     if not api_key:
-        raise RuntimeError(
-            "SARVAM_API_KEY is missing. "
-            "Please check GitHub Secrets."
-        )
+        raise RuntimeError("SARVAM_API_KEY is missing.")
 
-    # 2. Read generated script
-    script_file = Path("output/short_script.txt")
+    if not SCRIPT_FILE.exists():
+        raise FileNotFoundError("Script file is missing.")
 
-    if not script_file.exists():
-        raise FileNotFoundError(
-            "Script file not found: output/short_script.txt"
-        )
-
-    text = script_file.read_text(
-        encoding="utf-8"
-    ).strip()
+    text = SCRIPT_FILE.read_text(encoding="utf-8").strip()
 
     if not text:
         raise RuntimeError("Script is empty.")
 
-    if len(text) > 2500:
-        raise RuntimeError(
-            "Script exceeds 2500 characters."
+    sentences = split_sentences(text)
+
+    if not sentences:
+        raise RuntimeError("No sentences found.")
+
+    PARTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Remove old voice parts
+    for old_file in PARTS_DIR.glob("*.wav"):
+        old_file.unlink()
+
+    print(f"Generating {len(sentences)} separate voice scenes...")
+
+    session = requests.Session()
+    audio_files = []
+
+    for index, sentence in enumerate(sentences, start=1):
+
+        print(f"Generating voice scene {index}/{len(sentences)}")
+
+        response = session.post(
+            "https://api.sarvam.ai/text-to-speech",
+            headers={
+                "api-subscription-key": api_key,
+                "Content-Type": "application/json"
+            },
+            json={
+                "text": sentence,
+                "target_language_code": "hi-IN",
+                "model": "bulbul:v3",
+                "speaker": "shubh",
+                "output_audio_codec": "wav"
+            },
+            timeout=120
         )
 
-    print("Connecting to Sarvam AI...")
-    print("Generating Hindi AI voice...")
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Sarvam error in scene {index}: "
+                f"{response.status_code} {response.text}"
+            )
 
-    # 3. Send request to Sarvam AI
-    response = requests.post(
-        "https://api.sarvam.ai/text-to-speech",
+        data = response.json()
 
-        headers={
-            "api-subscription-key": api_key,
-            "Content-Type": "application/json"
-        },
+        if not data.get("audios"):
+            raise RuntimeError(
+                f"No audio received for scene {index}"
+            )
 
-        json={
-            "text": text,
-            "target_language_code": "hi-IN",
-            "model": "bulbul:v3",
-            "speaker": "shubh",
-            "output_audio_codec": "wav"
-        },
+        audio_bytes = base64.b64decode(data["audios"][0])
 
-        timeout=120
-    )
+        audio_path = PARTS_DIR / f"part_{index:03d}.wav"
+        audio_path.write_bytes(audio_bytes)
 
-    # 4. Handle API errors
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"Sarvam API Error: {response.status_code}\n"
-            f"{response.text}"
-        )
+        audio_files.append(audio_path)
 
-    # 5. Decode generated audio
-    data = response.json()
+    # Create a combined voiceover for compatibility
+    concat_file = OUTPUT / "voice_concat.txt"
 
-    if not data.get("audios"):
-        raise RuntimeError(
-            "Sarvam returned no audio data."
-        )
+    with open(concat_file, "w", encoding="utf-8") as f:
+        for audio_path in audio_files:
+            f.write(f"file '{audio_path.resolve()}'\n")
 
-    audio_data = base64.b64decode(
-        data["audios"][0]
-    )
+    subprocess.run([
+        "ffmpeg",
+        "-y",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", str(concat_file),
+        "-c:a", "pcm_s16le",
+        str(OUTPUT / "voiceover.wav")
+    ], check=True)
 
-    # 6. Save voiceover
-    output_dir = Path("output")
-    output_dir.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    audio_file = output_dir / "voiceover.wav"
-
-    audio_file.write_bytes(audio_data)
-
-    print("\nVOICE GENERATED SUCCESSFULLY!")
-    print("Audio saved at:", audio_file)
+    print("\nVOICE GENERATION SUCCESSFUL!")
+    print("Separate audio scenes:", len(audio_files))
+    print("Combined voice:", OUTPUT / "voiceover.wav")
 
 
 if __name__ == "__main__":
