@@ -1,529 +1,328 @@
 
-import os
-import math
+import re
 import subprocess
 from pathlib import Path
+from PIL import Image, ImageDraw, ImageFont
 
-import requests
-
-OUTPUT = Path("output")
-CLIPS = OUTPUT / "clips"
-
-WIDTH = 1080
-HEIGHT = 1920
+WIDTH = 720
+HEIGHT = 1280
 FPS = 30
 
-PEXELS_API = "https://api.pexels.com/v1/videos/search"
+OUTPUT = Path("output")
+SCRIPT_FILE = OUTPUT / "short_script.txt"
+AUDIO_FILE = OUTPUT / "voiceover.wav"
+VIDEO_FILE = OUTPUT / "short_video.mp4"
 
 
-def run_command(command):
-    result = subprocess.run(
+def run(command):
+    subprocess.run(
         command,
-        capture_output=True,
-        text=True
+        check=True,
+        stdout=subprocess.DEVNULL
     )
 
-    if result.returncode != 0:
-        raise RuntimeError(
-            "Video rendering failed:\n"
-            + result.stderr[-5000:]
-        )
 
-
-def check_tools():
-    for tool in ["ffmpeg", "ffprobe"]:
-        result = subprocess.run(
-            ["which", tool],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"{tool} is not installed.")
-
-
-def get_search_queries(script):
-    text = script.lower()
-
-    if any(word in text for word in [
-        "salary", "paisa", "paise", "money",
-        "middle class", " EMI", "income"
-    ]):
-        return [
-            "office worker working",
-            "counting money calculator",
-            "family at home"
-        ]
-
-    if any(word in text for word in [
-        "student", "college", "education", "exam"
-    ]):
-        return [
-            "college students studying",
-            "student studying books",
-            "university campus"
-        ]
-
-    if any(word in text for word in [
-        "social media", "instagram", "phone",
-        "internet", "online"
-    ]):
-        return [
-            "person using smartphone",
-            "people using computers",
-            "busy city people"
-        ]
-
-    if any(word in text for word in [
-        "politics", "government", "election",
-        "leader", "system"
-    ]):
-        return [
-            "Indian city traffic",
-            "people walking city",
-            "government building"
-        ]
-
-    return [
-        "people working office",
-        "Indian city street",
-        "family at home"
-    ]
-
-
-def search_pexels(api_key, query):
-    print("Searching stock footage:", query)
-
-    response = requests.get(
-        PEXELS_API,
-        headers={"Authorization": api_key},
-        params={
-            "query": query,
-            "orientation": "portrait",
-            "per_page": 10
-        },
-        timeout=40
-    )
-
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"Pexels API error {response.status_code}: "
-            f"{response.text[:1000]}"
-        )
-
-    return response.json().get("videos", [])
-
-
-def choose_video_file(video):
-    files = [
-        item for item in video.get("video_files", [])
-        if item.get("file_type") == "video/mp4"
-        and item.get("link")
-        and item.get("width")
-        and item.get("height")
-    ]
-
-    if not files:
-        return None
-
-    # Prefer portrait footage, then the best available resolution.
-    files.sort(
-        key=lambda item: (
-            abs(
-                item["width"] / item["height"]
-                - (9 / 16)
-            ),
-            -min(item["height"], 1920)
-        )
-    )
-
-    return files[0]
-
-
-def download_video(url, destination):
-    response = requests.get(
-        url,
-        stream=True,
-        timeout=120
-    )
-
-    response.raise_for_status()
-
-    with open(destination, "wb") as file:
-        for chunk in response.iter_content(1024 * 1024):
-            if chunk:
-                file.write(chunk)
-
-    if not destination.exists() or destination.stat().st_size < 10000:
-        raise RuntimeError("Downloaded stock video is invalid.")
-
-
-def collect_clips(api_key, queries):
-    CLIPS.mkdir(parents=True, exist_ok=True)
-
-    selected = []
-    seen = set()
-
-    for query in queries:
-        videos = search_pexels(api_key, query)
-
-        for video in videos:
-            if video["id"] in seen:
-                continue
-
-            video_file = choose_video_file(video)
-
-            if not video_file:
-                continue
-
-            seen.add(video["id"])
-
-            selected.append({
-                "id": video["id"],
-                "url": video_file["link"],
-                "photographer": video.get(
-                    "user", {}
-                ).get("name", "Pexels contributor")
-            })
-
-            if len(selected) >= 6:
-                break
-
-        if len(selected) >= 6:
-            break
-
-    if not selected:
-        raise RuntimeError(
-            "No suitable Pexels videos found. "
-            "Try another search or check your API key."
-        )
-
-    downloaded = []
-
-    for index, item in enumerate(selected):
-        destination = CLIPS / f"clip_{index}.mp4"
-
-        print("Downloading stock video", index + 1)
-
-        download_video(
-            item["url"],
-            destination
-        )
-
-        downloaded.append({
-            "path": destination,
-            "photographer": item["photographer"]
-        })
-
-    return downloaded
-
-
-def get_audio_duration(audio_file):
-    result = subprocess.run(
-        [
-            "ffprobe",
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(audio_file)
-        ],
-        capture_output=True,
-        text=True
-    )
-
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr)
-
-    return float(result.stdout.strip())
-
-
-def render_scene(clip, destination, duration):
-    print("Rendering scene:", destination.name)
-
-    run_command([
-        "ffmpeg",
-        "-y",
-        "-stream_loop", "-1",
-        "-i", str(clip),
-        "-t", f"{duration:.3f}",
-        "-vf",
-        (
-            "scale=1080:1920:"
-            "force_original_aspect_ratio=increase,"
-            "crop=1080:1920,"
-            "setsar=1,"
-            "fps=30,"
-            "eq=contrast=1.08:saturation=1.12"
-        ),
-        "-an",
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-crf", "23",
-        "-pix_fmt", "yuv420p",
-        "-r", "30",
-        str(destination)
+def get_duration():
+    result = subprocess.check_output([
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(AUDIO_FILE)
     ])
 
-
-def format_time(seconds):
-    milliseconds = int(round(seconds * 1000))
-
-    hours = milliseconds // 3600000
-    milliseconds %= 3600000
-
-    minutes = milliseconds // 60000
-    milliseconds %= 60000
-
-    secs = milliseconds // 1000
-    milliseconds %= 1000
-
-    return (
-        f"{hours:02}:{minutes:02}:{secs:02},"
-        f"{milliseconds:03}"
-    )
+    return float(result.decode().strip())
 
 
-def create_subtitles(script, duration):
-    words = script.split()
-
-    if not words:
-        raise RuntimeError("Script is empty.")
-
-    chunks = [
-        " ".join(words[i:i + 5])
-        for i in range(0, len(words), 5)
+def get_font(size, bold=False):
+    paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        if bold else
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     ]
 
-    total_words = len(words)
-    current_time = 0.0
-    entries = []
+    for path in paths:
+        if Path(path).exists():
+            return ImageFont.truetype(path, size)
 
-    for index, chunk in enumerate(chunks, start=1):
-        count = len(chunk.split())
-        segment_duration = duration * count / total_words
+    return ImageFont.load_default()
 
-        start = current_time
-        end = min(
-            duration,
-            current_time + segment_duration
-        )
 
-        entries.append(
-            f"{index}\n"
-            f"{format_time(start)} --> {format_time(end)}\n"
-            f"{chunk}\n"
-        )
+def split_script(text):
+    sentences = re.split(r'(?<=[.!?।])\s+', text.strip())
+    sentences = [s.strip() for s in sentences if s.strip()]
 
-        current_time = end
+    if not sentences:
+        return [text.strip()]
 
-    subtitle_file = OUTPUT / "captions.srt"
+    scenes = []
+    current = ""
 
-    subtitle_file.write_text(
-        "\n".join(entries),
-        encoding="utf-8"
+    for sentence in sentences:
+        if len(current) + len(sentence) < 100:
+            current += " " + sentence
+        else:
+            if current:
+                scenes.append(current.strip())
+            current = sentence
+
+    if current:
+        scenes.append(current.strip())
+
+    return scenes[:9]
+
+
+def wrap_text(text, font, max_width, draw):
+    words = text.split()
+    lines = []
+    current = ""
+
+    for word in words:
+        test = (current + " " + word).strip()
+
+        if draw.textbbox((0, 0), test, font=font)[2] <= max_width:
+            current = test
+        else:
+            if current:
+                lines.append(current)
+            current = word
+
+    if current:
+        lines.append(current)
+
+    return lines
+
+
+def create_scene(text, index, total):
+    image = Image.new("RGB", (WIDTH, HEIGHT))
+    pixels = image.load()
+
+    # Dark blue gradient background
+    for y in range(HEIGHT):
+        ratio = y / HEIGHT
+
+        r = int(9 + ratio * 10)
+        g = int(17 + ratio * 12)
+        b = int(39 + ratio * 30)
+
+        for x in range(WIDTH):
+            pixels[x, y] = (r, g, b)
+
+    draw = ImageDraw.Draw(image)
+
+    # Decorative shapes
+    draw.ellipse(
+        (470, 120, 850, 500),
+        outline=(35, 75, 125),
+        width=5
     )
 
-    return subtitle_file
+    draw.ellipse(
+        (-170, 850, 250, 1270),
+        outline=(30, 70, 115),
+        width=5
+    )
 
+    # Brand
+    brand_font = get_font(25, True)
+    draw.text(
+        (55, 65),
+        "SHAILENDRA TALKS",
+        font=brand_font,
+        fill=(100, 190, 255)
+    )
 
-def create_video():
-    api_key = os.getenv("PEXELS_API_KEY")
+    # Scene number
+    small_font = get_font(22)
+    draw.text(
+        (55, 145),
+        f"INSIGHT  {index:02d} / {total:02d}",
+        font=small_font,
+        fill=(145, 165, 195)
+    )
 
-    if not api_key:
-        raise RuntimeError(
-            "PEXELS_API_KEY is missing. "
-            "Add it to GitHub Secrets."
+    # Accent line
+    draw.rounded_rectangle(
+        (55, 205, 165, 215),
+        radius=5,
+        fill=(55, 160, 255)
+    )
+
+    # Main text
+    font = get_font(48, True)
+    lines = wrap_text(text, font, 600, draw)
+
+    line_height = 70
+    total_height = len(lines) * line_height
+    start_y = (HEIGHT - total_height) // 2
+
+    for i, line in enumerate(lines):
+        draw.text(
+            (55, start_y + i * line_height),
+            line,
+            font=font,
+            fill=(245, 248, 255),
+            stroke_width=1,
+            stroke_fill=(20, 35, 60)
         )
 
-    OUTPUT.mkdir(parents=True, exist_ok=True)
+    # Bottom branding
+    draw.line(
+        (55, 1150, 665, 1150),
+        fill=(55, 85, 125),
+        width=2
+    )
 
-    audio_file = OUTPUT / "voiceover.wav"
-    script_file = OUTPUT / "short_script.txt"
+    draw.text(
+        (55, 1175),
+        "THINK DIFFERENT. QUESTION EVERYTHING.",
+        font=get_font(17, True),
+        fill=(140, 165, 195)
+    )
 
-    if not audio_file.exists():
-        raise FileNotFoundError("Voiceover file is missing.")
+    path = OUTPUT / f"scene_{index:02d}.png"
+    image.save(path)
 
-    if not script_file.exists():
-        raise FileNotFoundError("Script file is missing.")
+    return path
 
-    check_tools()
 
-    script = script_file.read_text(
+def create_subtitles(scenes, durations):
+    current_time = 0
+    subtitle_file = OUTPUT / "captions.srt"
+
+    def timestamp(seconds):
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        millis = int((seconds - int(seconds)) * 1000)
+
+        return (
+            f"{hours:02d}:{minutes:02d}:"
+            f"{secs:02d},{millis:03d}"
+        )
+
+    with open(subtitle_file, "w", encoding="utf-8") as f:
+        for i, (scene, duration) in enumerate(zip(scenes, durations)):
+            start = current_time
+            end = current_time + duration
+
+            f.write(f"{i + 1}\n")
+            f.write(
+                f"{timestamp(start)} --> {timestamp(end)}\n"
+            )
+            f.write(f"{scene}\n\n")
+
+            current_time = end
+
+
+def generate_video():
+    OUTPUT.mkdir(exist_ok=True)
+
+    if not SCRIPT_FILE.exists():
+        raise FileNotFoundError("Script file missing.")
+
+    if not AUDIO_FILE.exists():
+        raise FileNotFoundError("Voiceover file missing.")
+
+    script = SCRIPT_FILE.read_text(
         encoding="utf-8"
     ).strip()
 
-    duration = get_audio_duration(audio_file)
+    scenes = split_script(script)
+    audio_duration = get_duration()
 
-    print("Video duration:", duration)
+    # Divide video time according to scene length
+    weights = [max(len(s), 1) for s in scenes]
+    total_weight = sum(weights)
 
-    print("Finding relevant stock footage...")
-    queries = get_search_queries(script)
-
-    clips = collect_clips(
-        api_key,
-        queries
-    )
-
-    # Create a cinematic montage with scene changes.
-    scene_count = min(
-        6,
-        max(3, math.ceil(duration / 7))
-    )
-
-    scene_duration = duration / scene_count
+    durations = [
+        audio_duration * weight / total_weight
+        for weight in weights
+    ]
 
     scene_files = []
 
-    for index in range(scene_count):
-        clip = clips[index % len(clips)]["path"]
+    print("Creating professional faceless scenes...")
 
-        scene_file = OUTPUT / f"scene_{index}.mp4"
-
-        render_scene(
-            clip,
-            scene_file,
-            scene_duration
+    for i, (scene, duration) in enumerate(
+        zip(scenes, durations), start=1
+    ):
+        image_path = create_scene(
+            scene,
+            i,
+            len(scenes)
         )
 
-        scene_files.append(scene_file)
+        video_path = OUTPUT / f"part_{i:02d}.mp4"
 
-    # Join all scenes.
+        frames = max(1, round(duration * FPS))
+
+        run([
+            "ffmpeg",
+            "-y",
+            "-loop", "1",
+            "-framerate", str(FPS),
+            "-i", str(image_path),
+            "-t", str(duration),
+            "-vf",
+            (
+                "zoompan="
+                "z='min(zoom+0.0005,1.06)':"
+                "d=1:"
+                "s=720x1280:"
+                "fps=30,"
+                "format=yuv420p"
+            ),
+            "-an",
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-pix_fmt", "yuv420p",
+            str(video_path)
+        ])
+
+        scene_files.append(video_path)
+
+    # Join scenes
     concat_file = OUTPUT / "concat.txt"
 
-    concat_file.write_text(
-        "".join(
-            f"file '{scene.resolve()}'\n"
-            for scene in scene_files
-        ),
-        encoding="utf-8"
-    )
+    with open(concat_file, "w") as f:
+        for path in scene_files:
+            f.write(f"file '{path.resolve()}'\n")
 
-    joined_file = OUTPUT / "joined_video.mp4"
+    silent_video = OUTPUT / "silent_video.mp4"
 
-    run_command([
+    run([
         "ffmpeg",
         "-y",
         "-f", "concat",
         "-safe", "0",
         "-i", str(concat_file),
         "-c", "copy",
-        str(joined_file)
+        str(silent_video)
     ])
 
-    # Create subtitles.
-    subtitle_file = create_subtitles(
-        script,
-        duration
-    )
+    # Add AI voiceover
+    run([
+        "ffmpeg",
+        "-y",
+        "-i", str(silent_video),
+        "-i", str(AUDIO_FILE),
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-c:v", "copy",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-shortest",
+        "-movflags", "+faststart",
+        str(VIDEO_FILE)
+    ])
 
-    # Credit the stock footage and its contributors.
-    photographers = list(dict.fromkeys(
-        item["photographer"] for item in clips
-    ))
+    create_subtitles(scenes, durations)
 
-    credits = (
-        "Stock footage: Pexels.com | "
-        "Video contributors: "
-        + ", ".join(photographers)
-    )
-
-    credit_file = OUTPUT / "stock_credits.txt"
-
-    credit_file.write_text(
-        credits,
-        encoding="utf-8"
-    )
-
-    # Burn subtitles and Pexels attribution into the video.
-    video_filter = (
-        "subtitles=output/captions.srt:"
-        "force_style='FontName=DejaVu Sans,"
-        "FontSize=52,"
-        "Bold=1,"
-        "PrimaryColour=&H00FFFFFF,"
-        "OutlineColour=&H00101010,"
-        "BackColour=&H90000000,"
-        "BorderStyle=3,"
-        "Outline=2,"
-        "Shadow=1,"
-        "Alignment=2,"
-        "MarginV=260',"
-        "drawtext=fontfile=/usr/share/fonts/truetype/dejavu/"
-        "DejaVuSans.ttf:"
-        "textfile=output/stock_credits.txt:"
-        "fontsize=20:"
-        "fontcolor=white@0.85:"
-        "box=1:"
-        "boxcolor=black@0.45:"
-        "boxborderw=8:"
-        "x=(w-text_w)/2:"
-        "y=h-100"
-    )
-
-    music_file = Path("assets/background_music.mp3")
-    final_file = OUTPUT / "short_video.mp4"
-
-    if music_file.exists():
-        print("Adding background music...")
-
-        run_command([
-            "ffmpeg",
-            "-y",
-            "-i", str(joined_file),
-            "-i", str(audio_file),
-            "-stream_loop", "-1",
-            "-i", str(music_file),
-            "-filter_complex",
-            (
-                "[1:a]volume=1.0[voice];"
-                "[2:a]volume=0.12,"
-                f"atrim=duration={duration:.3f}[music];"
-                "[voice][music]amix=inputs=2:"
-                "duration=first:"
-                "dropout_transition=2[aout]"
-            ),
-            "-map", "0:v:0",
-            "-map", "[aout]",
-            "-vf", video_filter,
-            "-t", f"{duration:.3f}",
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "22",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-movflags", "+faststart",
-            str(final_file)
-        ])
-
-    else:
-        print(
-            "No background music found. "
-            "Using voiceover only."
-        )
-
-        run_command([
-            "ffmpeg",
-            "-y",
-            "-i", str(joined_file),
-            "-i", str(audio_file),
-            "-map", "0:v:0",
-            "-map", "1:a:0",
-            "-vf", video_filter,
-            "-t", f"{duration:.3f}",
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "22",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-movflags", "+faststart",
-            str(final_file)
-        ])
-
-    print("\nCINEMATIC SHORT GENERATED SUCCESSFULLY!")
-    print("Final video:", final_file)
+    print("\nVIDEO GENERATED SUCCESSFULLY!")
+    print("Video:", VIDEO_FILE)
+    print("Subtitles:", OUTPUT / "captions.srt")
 
 
 if __name__ == "__main__":
-    create_video()
+    generate_video()
