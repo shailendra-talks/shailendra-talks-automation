@@ -15,7 +15,7 @@ OUTPUT = Path("output")
 SCENES_FILE = OUTPUT / "scenes.json"
 SCRIPT_FILE = OUTPUT / "short_script.txt"
 
-MODEL = "llama-3.3-70b-versatile"
+MODEL = "openai/gpt-oss-20b"
 
 NUMBER_OF_SCENES = 7
 
