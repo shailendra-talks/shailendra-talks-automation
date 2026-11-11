@@ -1,7 +1,4 @@
 
-groq
-google-api-python-client
-google-auth-oauthlib
-google-auth-httplib2
-requests
-Pillow
+groq>=0.30.0
+requests>=2.32.0
+Pillow>=11.0.0
