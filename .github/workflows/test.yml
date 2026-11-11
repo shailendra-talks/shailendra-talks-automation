@@ -33,6 +33,14 @@ jobs:
           ffmpeg -version
           ffprobe -version
 
+      - name: Restore Pixabay video cache
+        uses: actions/cache@v4
+        with:
+          path: output/pixabay_cache.json
+          key: pixabay-video-cache-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            pixabay-video-cache-
+
       - name: Generate AI script
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
@@ -43,7 +51,9 @@ jobs:
           SARVAM_API_KEY: ${{ secrets.SARVAM_API_KEY }}
         run: python -m src.voice
 
-      - name: Generate YouTube Shorts video
+      - name: Generate Hybrid Documentary Video
+        env:
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
         run: python -m src.video
 
       - name: Save final video and assets
@@ -55,6 +65,6 @@ jobs:
             output/short_script.txt
             output/voiceover.wav
             output/captions.srt
-            output/background.png
+            output/pixabay_credits.txt
           if-no-files-found: error
           retention-days: 7
